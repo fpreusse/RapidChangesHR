@@ -1369,6 +1369,7 @@ suff_stat_star_posi <- function(X_obs,eta,theta, w_i, id.focus,id.models, fix.se
     if(abs(eta[(n_eta-1)])>=1){
       eta[(n_eta-1)] <- (eta[(n_eta-1)]-0.1)/abs(eta[(n_eta-1)])
     }
+    N <- dim(X_obs)[1]
     V <- matrix(0, ncol=N, nrow=N)
     for(i in 1:N){
       for(j in 1:N){
@@ -1387,7 +1388,7 @@ suff_stat_star_posi <- function(X_obs,eta,theta, w_i, id.focus,id.models, fix.se
       mu <- X_whitened[,id.focus]*theta+X_whitened[,-id.focus]%*%eta[1:(n_eta-2)]
       Y_whitened <- qnorm(w_i, mean=mu, sd=sqrt(abs(eta[n_eta]))) 
       # color the sample again.
-      Y_star <- V.05%*%Y_whitenend
+      Y_star <- V.05%*%Y_whitened
     }else{
       # with a fixed seed, I achieve the same result as fixing w_i and using the inverse. 
       mu <- X_obs[,id.focus]*theta+X_selected[,-id.focus]%*%eta[1:(n_eta-2)]
