@@ -1184,7 +1184,7 @@ est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
     F_cd <- 1-round(P_star$mean_theta_star_leq_theta,4)
   }
   ## Check for unreasonable values; these can happen due to using Monte Carlo methods to compute the confidence distribution
-  # Currently, we simplify life by substituting the unreasonable value with the mean of the values before and after
+  # Currently, we simplify by substituting the unreasonable value with the mean of the values before and after
   # Repeat until there are no unreasonable values left (check after each update)
   id_larger <- which(F_cd[-1]< F_cd[-last.length.theta.star])
   while(length(id_larger)!=0){
@@ -1320,7 +1320,7 @@ U_star_posi <- function(eta, X_obs, w_i, u_obs, theta, id.focus,N, id.models, AR
       # based on Y_star we can now compute the sufficient statistics.
       # the goal is to reduce this to be as close to zero as possible!
       var.suff <- is.null(Var)
-      suff.stat <- suff_stat_posi(Y=Y_star, X=X_obs, id.focus=id.focus, id.selected=id.selected, AR=AR, Var=var.suff)
+      suff.stat <- suff_stat_posi(Y=Y_star, X=X_obs, id.focus=id.focus, id.selected=id.models[[1]], AR=AR, Var=var.suff)
       out <- sum((suff.stat$nuisance-u_obs)^2)
     }else{
       # with a fixed seed, I achieve the same result as fixing w_i and using the inverse. 
@@ -1337,7 +1337,7 @@ U_star_posi <- function(eta, X_obs, w_i, u_obs, theta, id.focus,N, id.models, AR
   }else{
     mu <- X_obs[,id.focus]*theta+X_selected[,-id.focus]%*%eta
     Y_star <- qnorm(w_i, mean=mu, sd=sqrt(Var[[1]]))
-    suff.stat <- suff_stat_posi(Y=Y_star, X=X_obs, id.focus=id.focus, id.selected=id.selected, AR=F, Var=F)
+    suff.stat <- suff_stat_posi(Y=Y_star, X=X_obs, id.focus=id.focus, id.selected=id.models[[1]], AR=F, Var=F)
     out <- sum((suff.stat$nuisance-u_obs)^2)
   }
   if(is.infinite(out)){out <- 10^16}
