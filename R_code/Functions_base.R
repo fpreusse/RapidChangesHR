@@ -1316,7 +1316,7 @@ U_star_posi <- function(eta, X_obs, w_i, u_obs, theta, id.focus,N, id.models, AR
       mu <- X_whitened[,id.focus]*theta+X_whitened[,-id.focus]%*%eta[1:(n_eta-2)]
       Y_whitened <- qnorm(w_i, mean=mu, sd=sqrt(abs(eta[n_eta]))) 
       # color the sample again.
-      Y_star <- V.05%*%Y_whitenend
+      Y_star <- V.05%*%Y_whitened
       # based on Y_star we can now compute the sufficient statistics.
       # the goal is to reduce this to be as close to zero as possible!
       var.suff <- is.null(Var)
