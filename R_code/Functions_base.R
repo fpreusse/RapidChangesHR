@@ -1999,9 +1999,9 @@ fmri_group_KH <- function(est_eta, var_mat_full, betas_c, N){
   XWX <- t(X)%*%var_mat_full%*%X
   P <- var_mat_full-var_mat_full%*%X%*%solve(XWX)%*%t(X)%*%var_mat_full
   bPb <-t(betas_c)%*%P%*%betas_c
-  var_a <- 1/(N-1)*bPb*solve(XWX)
+  var_a <- 1/(N-2)*bPb*solve(XWX)
   T_KH <- est_eta/sqrt(var_a)
-  p_val <- 2*(pt(-abs(T_KH), df=N-1))
+  p_val <- 2*(pt(-abs(T_KH), df=N-2))
   out <- list(test_statistic= T_KH,
               p_value = p_val,
               observations = betas_c,
@@ -2019,7 +2019,7 @@ fmri_group_KH <- function(est_eta, var_mat_full, betas_c, N){
 # p-value corresponding to the null hypotheses: eta=null_eta 
 fmri_test_own <- function(est_eta, var_mat_full, N, null_eta=0){
   var_group <- solve(var_mat_full)
-  test_statistic <- (est_eta-null_eta)/(sqrt(sum(var_group)))*N
+  test_statistic <- (est_eta-null_eta)/(sqrt(sum(var_group)))
   p_val <- 2*(1-pt(abs(test_statistic), df=N-2))
   return(p_val)
 }
