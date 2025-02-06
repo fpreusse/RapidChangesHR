@@ -2018,8 +2018,9 @@ fmri_group_KH <- function(est_eta, var_mat_full, betas_c, N){
 ## Output:
 # p-value corresponding to the null hypotheses: eta=null_eta 
 fmri_test_own <- function(est_eta, var_mat_full, N, null_eta=0){
-  var_group <- solve(var_mat_full)
-  test_statistic <- (est_eta-null_eta)/(sqrt(sum(var_group)))
+  X <- matrix(rep(1, N), ncol=1)
+  XWX <- t(X)%*%var_mat_full%*%X
+  test_statistic <- (est_eta-null_eta)/(sqrt(solve(XWX))
   p_val <- 2*(1-pt(abs(test_statistic), df=N-1))
   return(p_val)
 }
