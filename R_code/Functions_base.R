@@ -17,31 +17,34 @@
 # min_stat: minimum number of condition onsets per stationary segment
 # inter_time: time in seconds at which the basis functions are measured, it is fixed at 0.05
 # intercept: baseline of the HR signal for all subjects
+# nROI: number of considered ROI per subject
+# rho_ROI: correlation coefficient of the ROIs, assumed is an equi-correlation structure
 ## Output:
 # BOLD: simulated BOLD signal
 # true_cp_loc: true change point location per subject
-# true_shape_para: true shape parameters
-# true_hrf: true matrix containing the true HR per condition
-# effect_size_changes: mean_change
 # onsets: matrix containing the condition onset time series
 # nscan: nscan
-# nstim: nstim 
-# SNR: snr
-# difference_shape_1: true difference between the shape parameters of the HRs to condition 1
-# difference_shape_2true difference betwen the shape parameters of the HRs to condition 2
+# true_dif_shape: list containing true difference between the shape parameters of the HRs to condition 1 and condition 2
 # no_cp: number of change points, fixed at c(1,1)
-# true_signal: BOLD signal without noise
 simulate_BOLD_basis_func <- function(mean_change=c(0.5,0.5),
-                                   var_change=c(1),
-                                   basis_func,
+                                   var_change=c(0.1),
+                                   basis_func=NULL,
                                    basis_beta= c(3.2, -6.4, 3.2),
-                                   rho=0.2,
+                                   rho=0,
                                    snr,
-                                   N,
-                                   nscan, nstim,
+                                   nscan, 
+                                   nstim ,
+                                   min_stat=10, 
+                                   number_cp=c(1,1), N,
                                    inter_time=0.05,
-                                   min_stat=10,
-                                   intercept=0){
+                                   nROI, rho_ROI=0.2,
+                                  intercept){
+  # compute the covariance between the changes in the ROIs
+  rho_ROI <- var_change*rho_ROI
+  
+  # check that mean_change has the same length as number of change points
+  if(sum(number_cp)!= length(mean_change))stop("check that mean change has length of the number of change points")
+  
   ## Initialize Stimulus time series: 
   # Random interstimulus intervals with mean such that all stimuli fit in there
   mean_itis <- floor(nscan/nstim)
@@ -94,12 +97,13 @@ simulate_BOLD_basis_func <- function(mean_change=c(0.5,0.5),
   
   ## Initialize change points
   # Choose randomly one change point excluding the very beginning and very end (defined by min_stat)
+  
   id_cp_2 <- sort(os2) # time of stimulus presentation
   
   id_cp_1 <- sort(os1) # time of stimulus presentation
   
-  cp_loc <- matrix(c(sample(id_cp_1[(min_stat+1):(length(id_cp_1)-min_stat+1)],N, replace=T),
-                     sample(id_cp_2[(min_stat+1):(length(id_cp_2)-min_stat+1)],N, replace=T)),
+  cp_loc <- matrix(c(sample(id_cp_1[(min_stat+1):(length(id_cp_1)-min_stat)],N, replace=T),
+                     sample(id_cp_2[(min_stat+1):(length(id_cp_2)-min_stat)],N, replace=T)),
                    nrow = N, byrow=F)
   stim_1_1 <- stim_1_2 <-stim_2_1 <- stim_2_2 <-  matrix(0,ncol=nscan, nrow=N)
   for(i in 1:N){
@@ -108,95 +112,107 @@ simulate_BOLD_basis_func <- function(mean_change=c(0.5,0.5),
     stim_2_1[i,1:(cp_loc[i,2]-1)] <- stim_2[1:(cp_loc[i,2]-1)]
     stim_2_2[i,cp_loc[i,2]:nscan] <- stim_2[cp_loc[i,2]:nscan]
   }
+  
   true_cp <- cp_loc-1 #true cp returns the last observation of a stationary block.
   
   ## Initialize the true shape of the two HRFs
-  # Intercept: not important for shape of HRF, assumed to not change.
-  beta_intercept <- intercept 
   
+  # Intercept: not important for shape of HRF
+   beta_intercept <- matrix(intercept, ncol=nROI, nrow=N)
+  
+  ## For changing HRF:
   # initialize the HRF before the change point:
-  hrf_bc <- as.vector(basis_func%*%basis_beta)
+  hrf_bc <- basis_beta[1]*basis_func[,1]+basis_beta[2]*basis_func[,2]+basis_beta[3]*basis_func[,3]
   
   # multiply by the value such that beta_after[1]= effect_size+beta_before.
-  changes <- matrix(c(rnorm(N, mean_change[1],var_change),
-                      rnorm(N, mean_change[2],var_change)),
-                    nrow=N, ncol=2, byrow=F)
+  # this way I can ensure that the effect size follows a normal distribution (with very low variance though!)
+  sig <- matrix(rho_ROI, nrow=nROI, ncol=nROI)
+  diag(sig) <- var_change
+  changes1 <- mvrnorm(N, rep(mean_change[1], nROI), sig)
+  changes2 <- mvrnorm(N, rep(mean_change[2], nROI), sig)
+  # these are two matrices with ncol=nROI and nrow=N
   
-  m_ratio <- (basis_beta[1]+changes)/basis_beta[1]
+  m_ratio1 <- (basis_beta[1]+changes1)/basis_beta[1]
+  m_ratio2 <- (basis_beta[1]+changes2)/basis_beta[1]
   
-  # compute the true HR
-  hrf_mat <- design_mat <-  vector("list", N)
+ 
+  ## compute the true HRF
+  hrf_mat <- design_mat <- lapply(rep("list", nROI), vector, length=N)
   onsets <- matrix(c(stim_1, stim_2), ncol=2, byrow=F)
-  Y <- Signals_all <-matrix(nrow=N, ncol=nscan)
+  Y<- Signals_all <- lapply(rep(0, nROI), matrix, ncol=nscan, nrow=N) 
+  # Y is a list of length nROI, containing a matrix with nrow=N and ncol=nscan (BOLD signal for N participants per ROI)
+  basis_hrf <- basis_beta[1]*basis_func[,1]+basis_beta[2]*basis_func[,2]+basis_beta[3]*basis_func[,3]
+  # number of basis function needed for that:
   nbf <- ncol(basis_func)
   for(i in 1:N){
-    # true HR
-    hrf_helper <- matrix(0, ncol=3, nrow= nrow(basis_func))
-    hrf_helper[,1] <- hrf_bc 
-    hrf_helper[,2] <- hrf_helper[,1]*m_ratio[i,1]
-    hrf_helper[,3] <- hrf_helper[,1]*m_ratio[i,2]
-    hrf_mat[[i]] <- hrf_helper
-    
-    # initialize Y without noise:[i,]
+    # initialize onset time series for each subject. This is the same across all ROIs.
     os <- matrix(0, ncol=4, nrow=nscan)
     os[,c(1,3)] <- onsets
     os[,2] <- onsets[,1]
     os[,4] <- onsets[,2]
     os[1:true_cp[i,1],2] <- os[(true_cp[i,1]+1):nscan,1] <- os[1:true_cp[i,2],4] <- os[(true_cp[i,2]+1):nscan,3] <-0
     
+    # add design matrix, this is also the same across all ROIs
     hrf_matrix <- matrix(nrow= nscan, ncol= 4*nbf)
-    
-    # only take values of the HR every TR=2 seconds:
+    # only take values of the HR every TR seconds:
     time_sample <- 2/inter_time
     
-    for(j in 1:4){
+    for(l in 1:4){
       for(p in 1:nbf){
-        hrf_matrix[,(j-1)*nbf+p] <- convolve(os[,j], rev(basis_func[seq(1,559,by=time_sample),p]), type="open")[1:nscan]
+        hrf_matrix[,(l-1)*nbf+p] <- convolve(os[,l], rev(basis_func[seq(1,559,by=time_sample),p]), type="open")[1:nscan]
       }
     }
-    beta_all <- c(basis_beta, m_ratio[i,1]*basis_beta,basis_beta, m_ratio[i,2]*basis_beta)
-    Signals_all[i,] <- signal <- hrf_matrix%*%beta_all+ beta_intercept[i]
-    if(rho==0){
-      noise_sd <- mean(signal)/snr
-      Y[i,] <- signal+rnorm(nscan, mean=0, sd=noise_sd)
-    }else{
-      var_epsilon <- (mean(signal)/snr)^2
-      sd_ar <- sqrt(var_epsilon*(1-rho^2))
-      Y[i,] <- signal+arima.sim(model=list(ar=rho),n=nscan, sd=sd_ar)
+    for(j in 1:nROI){
+      # true HR for subject i in ROI j
+      hrf_helper <- matrix(0, ncol=3, nrow= nrow(basis_func))
+      hrf_helper[,1] <- basis_hrf
+      hrf_helper[,2] <- hrf_helper[,1]*m_ratio1[i,j]
+      hrf_helper[,3] <- hrf_helper[,1]*m_ratio2[i,j]
+      hrf_mat[[j]][[i]] <- hrf_helper
+      
+      # get the subject and ROI specific model parameters:
+      beta_all <- c(beta_intercept,basis_beta, m_ratio1[i,j]*basis_beta,basis_beta, m_ratio2[i,j]*basis_beta)
+      # compute the subject and ROI specific signal
+      hrf_matrix <- cbind(rep(1,nscan) , hrf_matrix)
+      Signals_all[[j]][i,] <- signal <- hrf_matrix%*%beta_all
+      
+      ## add noise 
+      if(rho==0){
+        noise_sd <- abs(mean(signal)/snr)
+        Y[[j]][i,] <- signal+rnorm(nscan, mean=0, sd=noise_sd)
+      }else{
+        var_epsilon <- (mean(signal)/snr)^2
+        sd_ar <- sqrt(var_epsilon*(1-rho^2))
+        Y[[j]][i,] <- signal+arima.sim(model=list(ar=rho),n=nscan, sd=sd_ar)
+      }
     }
   }
-  # compute the true shape parameters:
-  shape_per_hrf <- matrix(ncol=10, nrow=ncol(hrf_mat[[1]]))
+  ## compute the true shapes and shape parameter:
+  shape_per_hrf <- matrix(ncol=10, nrow=3)
   colnames(shape_per_hrf) <- c("PM", "NA", "IUA", "TTP", "TPN", "FWHM", "FWHN", "AUC", "AC_P", "DC_P")
-  shape_param <- vector("list", N)
-  dif_1 <- dif_2 <- matrix(ncol=10, nrow=N)
-  colnames(dif_1) <- colnames(dif_2) <- c("PM", "NA", "IUA", "TTP", "TPN", "FWHM", "FWHN", "AUC", "AC_P", "DC_P")
-  for(i in 1:N){
-    for(j in 1:nrow(shape_per_hrf)){
-      shape_per_hrf[j,] <- shape_parameters2(hrf_mat[[i]][,j], baseline=0, tres=0.1, max.ttp=12)
-    }
-    shape_param[[i]] <- shape_per_hrf
-    dif_1[i,] <- shape_per_hrf[1,]-shape_per_hrf[2,] 
-    dif_2[i,] <- shape_per_hrf[1,]-shape_per_hrf[3,] 
-  }
+  dif_1 <- dif_2 <- lapply(rep(0, nROI), matrix, ncol=10, nrow=N)
   
+  for(j in 1:nROI){
+    colnames(dif_1[[j]]) <- colnames(dif_2[[j]]) <- c("PM", "NA", "IUA", "TTP", "TPN", "FWHM", "FWHN", "AUC", "AC_P", "DC_P")
+    for(i in 1:N){
+      for(q in 1:3){
+        shape_per_hrf[q,] <- shape_parameters2(hrf_mat[[j]][[i]][,q], baseline=0, tres=0.1, max.ttp=12)
+      }
+      dif_1[[j]][i,] <- shape_per_hrf[1,]-shape_per_hrf[2,] 
+      dif_2[[j]][i,] <- shape_per_hrf[1,]-shape_per_hrf[3,]
+    }
+  }
+ 
   output <- list(BOLD=Y,
                  true_cp_loc = true_cp,
-                 true_shape_para = shape_param,
-                 true_hrf= hrf_mat,
-                 effect_size_changes= changes,
                  onsets = onsets,
                  nscan=nscan,
-                 nstim= nstim, 
-                 SNR=snr,
-                 difference_shape_1 = dif_1,
-                 difference_shape_2= dif_2,
-                 no_cp = c(1,1),
-                 true_signal = Signals_all)
+                 true_difference_shape = list("condition_1"= dif_1,
+                                              "condition_2"= dif_2),
+                 no_cp = number_cp)
   return(output)
 }
-
-### Estimate regression coefficients and their variance for one subject
+### Estimate regression coefficients and their variance for one subject and one ROI
 ## Input:
 # BOLD_signal: observed BOLD signal for one subject
 # true_cp_location: true location of the change point(s) per condition
@@ -337,203 +353,401 @@ est_betas_var <- function(BOLD_signal, true_cp_location, onsets, nscan, number_c
 # var_change: between subject variance 
 # beta_basis: regression coefficients corresponding to the basis_function, used to define the shape of the HRs before the change points 
 # misspec: larges absolute difference between true change point location and change point location used in analysis
+# nROI: number of considered ROI per subject
+# rho_ROI: correlation coefficient between the considered ROIs.
 ## Output:
 # p_values_KH: p_values corresponding to the null hypotheses of no change in the different conditions and shape parameters; based on T_KH
 # p_values_Wald:  p_values corresponding to the null hypotheses of no change in the different conditions and shape parameters; based on T_WALD
 # est_eta: estimated difference of the shape parameter on group level
-# true_shape_parameter: true shape parameters per subject
-# est_dif_shape_param: estimated difference between the shape parameters on subject level
+# true_difference_shape: true difference of the shape parameters per subject and ROI
+# est_difference_shape: estimated difference between the shape parameters per subject and ROI
 # between_subject_variance: between subject variance
 # variance_group_level: variance on group level
+# within_subject_variance: within subject variance
 ## Remark:
 # The considered shape parameters are: PM, NA, TTP, TPN, FWHM, FWHN, AUC
 # For the simulation study this function is run repeatedly. 
 # The set of rejected null hypotheses is defined through the application of hierarchical testing methods on the p-values 
 # The FLOBS basis functions have been used.
 # To make computation faster, we have set rho=0, so that pre-whitening was not necessary.
-sim_known_cp <- function(effect, N, snr1, seed, basis_function, var_change=c(0.1), beta_basis =c(3.2, -6.4, 3.2),misspec = 0){
+sim_known_cp <- function(effect, N, snr1, seed, basis_function, var_change=c(0.1), beta_basis =c(3.2, -6.4, 3.2),misspec = 0,rho1, nROI, rho_ROI){
   set.seed(seed)
   sim_BOLD <- simulate_BOLD_basis_func(mean_change = effect,
                                        nscan=500,
                                        nstim=120,
                                        min_stat=15,
                                        snr=snr1,
-                                       rho=0,
+                                       rho=rho1,
                                        number_cp = c(1,1),
                                        N=N,
                                        basis_func = basis_function,
                                        var_change=var_change,
-                                       basis_beta= beta_basis
+                                       basis_beta= beta_basis,
+                                       nROI=nROI, rho_ROI= rho_ROI
   )
-  output_est_betas_var <-output_est_sp_var<- vector("list", N)
-  for(i in 1:N){
-    print(i)
-    output_est_betas_var[[i]] <- betas_var<- est_betas_var(BOLD_signal=sim_BOLD$BOLD[i,], true_cp_location=sim_BOLD$true_cp_loc[i,],
-                                                           onsets= sim_BOLD$onsets, nscan=sim_BOLD$nscan, number_cp = sim_BOLD$no_cp,
-                                                           hrf_basis_fun=hrf_basis_fun, misspec= misspec)
-    output_est_sp_var[[i]] <- est_var_sp_subject(betas= betas_var$est_beta, covar_betas=betas_var$var_within$hat_covar, hrf=hrf_basis_fun, mc_B=10000, fix_seed=seed+14)
-    # this returns the estimator per shape parameter and the covariance matrix per shape parameter
-  }
-  between_subject_variance <-p_vals_1 <- p_vals_2 <-est_eta<- matrix(ncol=7, nrow=2)
-  var_group_level <-est_dif_shape_para<- vector("list", 7)
-  colnames(between_subject_variance) <-colnames(p_vals_1)<- colnames(p_vals_2)<-colnames(est_eta)<- names(var_group_level) <- names(est_dif_shape_para)<- c("PM", "NA", "IUA", "TTP", "TPN", "FWHM", "FWHN", "AUC", "AC_P", "DC_P")[c(1,2,4:8)]
-  
-  indice <- 1
-  
-  for(sp in c(1,2,4:8)){
-    sp_sub_1 <- sp_sub_2 <- matrix(0, ncol=2, nrow=N)
-    sp_var_sub_1 <- sp_var_sub_2 <- vector("list", N)
-    for(i in 1:N){
-      sp_sub_1[i,1] <- output_est_sp_var[[i]]$point_estimators[[sp]][1]
-      sp_sub_1[i,2] <- output_est_sp_var[[i]]$point_estimators[[sp]][2]
-      sp_var_sub_1[[i]] <- output_est_sp_var[[i]]$variances[[sp]][1:2,1:2]
-      
-      sp_sub_2[i,1] <- output_est_sp_var[[i]]$point_estimators[[sp]][3]
-      sp_sub_2[i,2] <- output_est_sp_var[[i]]$point_estimators[[sp]][4]
-      sp_var_sub_2[[i]] <- output_est_sp_var[[i]]$variances[[sp]][3:4,3:4]
-    }
-    
-    if(REML){
-      group_estimation_1 <- reml_var_estimation_2(betas_sub=sp_sub_1, var_sub=sp_var_sub_1, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
-      group_estimation_2 <- reml_var_estimation_2(betas_sub=sp_sub_2, var_sub=sp_var_sub_2, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
+  output_est_sp_var<- lapply(rep("list", nROI), vector, length=N)
+  if(rho1==0){
+      pre_whit <- F
     }else{
-      group_estimation_1 <- em_estimation(betas_sub=sp_sub_1, var_sub=sp_var_sub_1, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
-      group_estimation_2 <- em_estimation(betas_sub=sp_sub_2, var_sub=sp_var_sub_2, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
+      pre_whit <- T
+    }
+  for(j in 1:nROI){
+    for(i in 1:N){
+      betas_var<- est_betas_var(BOLD_signal=sim_BOLD$BOLD[[j]][i,], true_cp_location=sim_BOLD$true_cp_loc[i,],
+                                                           onsets= sim_BOLD$onsets, nscan=sim_BOLD$nscan, number_cp = sim_BOLD$no_cp,
+                                                           hrf_basis_fun=hrf_basis_fun, misspec= misspec, prewhiten=pre_whit)
+      output_est_sp_var[[j]][[i]] <- est_var_sp_subject(betas= betas_var$est_beta, covar_betas=betas_var$var_within$hat_covar, hrf=hrf_basis_fun, mc_B=10000, fix_seed=seed+14)
+      # this returns the estimator per shape parameter and the covariance matrix per shape parameter
+  }
+  }
+  rm(betas_var)
+  between_subject_variance <-p_vals_1 <- p_vals_2 <-est_eta<- lapply(rep(0,nROI), matrix, ncol=7, nrow=2)
+  var_group_level <-est_dif_shape_para<- lapply(rep("list", nROI), vector, length=7)
+ 
+  for(j in 1:nROI){
+    colnames(between_subject_variance[[j]]) <-colnames(p_vals_1[[j]])<- colnames(p_vals_2[[j]])<-colnames(est_eta[[j]])<- names(var_group_level[[j]]) <- names(est_dif_shape_para[[j]])<- c("PM", "NA", "IUA", "TTP", "TPN", "FWHM", "FWHN", "AUC", "AC_P", "DC_P")[c(1,2,4:8)]
+     indice <- 1
+    for(sp in c(1,2,4:8)){
+      sp_sub_1 <- sp_sub_2 <- matrix(0, ncol=2, nrow=N)
+      sp_var_sub_1 <- sp_var_sub_2 <- vector("list", N)
+      for(i in 1:N){
+        sp_sub_1[i,1] <- output_est_sp_var[[i]]$point_estimators[[sp]][1]
+        sp_sub_1[i,2] <- output_est_sp_var[[i]]$point_estimators[[sp]][2]
+        sp_var_sub_1[[i]] <- output_est_sp_var[[i]]$variances[[sp]][1:2,1:2]
+      
+        sp_sub_2[i,1] <- output_est_sp_var[[i]]$point_estimators[[sp]][3]
+        sp_sub_2[i,2] <- output_est_sp_var[[i]]$point_estimators[[sp]][4]
+        sp_var_sub_2[[i]] <- output_est_sp_var[[i]]$variances[[sp]][3:4,3:4]
+      }
+    
+      if(REML){
+        group_estimation_1 <- reml_var_estimation_2(betas_sub=sp_sub_1, var_sub=sp_var_sub_1, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
+        group_estimation_2 <- reml_var_estimation_2(betas_sub=sp_sub_2, var_sub=sp_var_sub_2, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
+      }else{
+        group_estimation_1 <- em_estimation(betas_sub=sp_sub_1, var_sub=sp_var_sub_1, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
+        group_estimation_2 <- em_estimation(betas_sub=sp_sub_2, var_sub=sp_var_sub_2, contrast=c(-1,1),N=N,maxit=500, retol= 1*10^-8, converge_lim=10, converge_curve=F,full_covar=F)
     }
     
-    est_eta[1,indice] <- group_estimation_1$beta_group
-    est_eta[2, indice] <- group_estimation_2$beta_group
-    between_subject_variance[1, indice] <- group_estimation_1$sigma_between
-    between_subject_variance[2, indice]<- group_estimation_2$sigma_between
-    var_group_level[[indice]] <- list(condition1= group_estimation_1$var_mat,
-                                      condition2= group_estimation_2$var_mat)
-    est_dif_shape_para[[indice]] <- list(condition1= group_estimation_1$betas_subject,
-                                         condition2= group_estimation_2$betas_subject)
+      est_eta[[j]][1,indice] <- group_estimation_1$beta_group
+      est_eta[[j]][2, indice] <- group_estimation_2$beta_group
+      between_subject_variance[[j]][1, indice] <- group_estimation_1$sigma_between
+      between_subject_variance[[j]][2, indice]<- group_estimation_2$sigma_between
+      var_group_level[[j]][[indice]] <- list(condition1= group_estimation_1$var_mat,
+                                             condition2= group_estimation_2$var_mat)
+      est_dif_shape_para[[j]][[indice]] <- list(condition1= group_estimation_1$betas_subject,
+                                                condition2= group_estimation_2$betas_subject)
     
-    # compute p-values per shape parameter
+      # compute p-values per shape parameter
     
-    test_KH_1 <- fmri_group_KH(est_eta=as.vector(group_estimation_1$beta_group), 
-                               var_mat_full=group_estimation_1$var_mat, 
-                               betas_c=as.vector(group_estimation_1$betas_subject), N=N)
-    test_KH_2 <- fmri_group_KH(est_eta=as.vector(group_estimation_2$beta_group), 
-                               var_mat_full=group_estimation_2$var_mat, 
-                               betas_c=as.vector(group_estimation_2$betas_subject), N=N)
+      test_KH_1 <- fmri_group_KH(est_eta=as.vector(group_estimation_1$beta_group), 
+                                 var_mat_full=group_estimation_1$var_mat, 
+                                 betas_c=as.vector(group_estimation_1$betas_subject), N=N)
+      test_KH_2 <- fmri_group_KH(est_eta=as.vector(group_estimation_2$beta_group), 
+                                 var_mat_full=group_estimation_2$var_mat, 
+                                 betas_c=as.vector(group_estimation_2$betas_subject), N=N)
     
-    p_vals_1[1, indice] <- test_KH_1$p_value
-    p_vals_1[2, indice] <- test_KH_2$p_value
+      p_vals_1[[j]][1, indice] <- test_KH_1$p_value
+      p_vals_1[[j]][2, indice] <- test_KH_2$p_value
     
-    p_vals_2[1, indice] <- fmri_test_own(est_eta=as.vector(group_estimation_1$beta_group),
-                                         var_mat_full=group_estimation_1$var_mat,
-                                         N=N, null_eta=0)
-    p_vals_2[2, indice] <- fmri_test_own(est_eta=as.vector(group_estimation_2$beta_group),
-                                         var_mat_full=group_estimation_2$var_mat,
-                                         N=N, null_eta=0)
+      p_vals_2[[j]][1, indice] <- fmri_test_own(est_eta=as.vector(group_estimation_1$beta_group),
+                                           var_mat_full=group_estimation_1$var_mat,
+                                           N=N, null_eta=0)
+      p_vals_2[[j]][2, indice] <- fmri_test_own(est_eta=as.vector(group_estimation_2$beta_group),
+                                           var_mat_full=group_estimation_2$var_mat,
+                                           N=N, null_eta=0)
     
-    indice <- indice+1
+      indice <- indice+1
+    }
   }
-  
   out <- list(p_values_KH = p_vals_1,
               p_values_Wald= p_vals_2,
               est_eta = est_eta,
-              true_shape_parameter= sim_BOLD$true_shape_para,
-              est_dif_shape_param = est_dif_shape_para,
+              true_difference_shapes= sim_BOLD$true_difference_shape,
+              est_difference_shapes = est_dif_shape_para,
               between_subject_variance= between_subject_variance,
-              variance_group_level = var_group_level
+              variance_group_level = var_group_level,
+              within_subject_variances= output_est_sp_var
   )
   return(out)
 }
 
 ### Analysis of simulation results
 ## Input:
-# dat_considered: output of sim_known_cp
-# snr1: the SNR corresponding to dat_considered
-# eff: the effect corresponding to dat_considered
-# B: number of iterations 
+# sim_results: output of sim_known_cp
+# snr: the SNR corresponding to dat_considered
+# effect: the effect corresponding to dat_considered
+# nROI: number of considered ROI
+# alpha: level at which the FWER is supposed to be controlled
+# N: number of subjects
 ## Output:
-# dat_rejected: dataframe containing the raw analysis results, i.e., which shape parameter have been rejected per iteration and effect size.
-# rejected_means:dataframe containing a summary of dat_rejected, i.e., the proportion of rejected null hypotheses per shape parameter and effect size
-# FDR: The average false discovery proportion based on T_KH and T_Wald
-known_cp_results <- function(dat_considered, snr1, eff, B=1000){
-  dat_rejected <- data.frame(snr=rep(snr1, 4*B),
-                             mean_effect= rep(rep(eff, each=B),2),
-                             test= character(4*B),
-                             iteration= rep(c(1:B),4))
-  mat_rejected <- matrix(ncol=7, nrow=4*B)
-  names_sp <- c("PM", "NA", "IUA", "TTP", "TPN", "FWHM", "FWHN", "AUC", "AC_P", "DC_P")[c(1,2,4:8)]
-  m <- length(names_sp)
-  colnames(mat_rejected) <- names_sp
-  dat_rejected <- cbind(dat_rejected, mat_rejected)
-  # this is currently in a long format, use tidy to put it into long format for ggplot graphics.
+# summary_eta: dataframe containing summary statistics such as the empirical average and standard deviation of the group level estiamtes
+# summary_rej:list containing dataframes with the empirical rejection rates for each level of the hierarchy of the hypotheses
+# full_data: Full results of the estimated eta per subject and ROI, as well as the rejections at each level of the 
+analyze_known_cp <- function(sim_results, effect, snr, nROI=5, alpha=0.05,N){
+  ### start with the proposed procedure:
+  # report the estimated eta and it's empirical standard deviation
+  B <- length(sim_results)
+  est_eta_1_prop <- est_eta_2_prop <-matrix(ncol=7, nrow=B*nROI)
+  names_shape <- c("PM", "NA", "TTP", "TPN", "FWHM", "FWHN", "AUC")
+  for(b in 1:B){
+    for(j in 1:nROI){
+      est_eta_1_prop[((b-1)*nROI+j),] <- sim_results[[b]]$proposed$est_eta[[j]][1,] 
+      est_eta_2_prop[((b-1)*nROI+j),] <- sim_results[[b]]$proposed$est_eta[[j]][2,]
+    }
+  }
+  
+  # Compute the average and empirical standard deviation:
+  av_est_eta <- data.frame(mean= c(colMeans(est_eta_1_prop, na.rm=T), colMeans(est_eta_2_prop, na.rm=T)),
+                           sd= c(apply(est_eta_1_prop, 2, sd, na.rm=T), apply(est_eta_2_prop, 2, sd, na.rm=T)),
+                           shape_para= rep(names_shape, 2),
+                           effect = rep(effect, each=7),
+                           snr= rep(snr, 14))
+  est_eta_1_prop <- as.data.frame(est_eta_1_prop)
+  est_eta_2_prop <- as.data.frame(est_eta_2_prop)
+  
+  est_eta_1_prop$effect <- effect[1]
+  est_eta_2_prop$effect <- effect[2]
+  est_eta_prop <- rbind(est_eta_1_prop, est_eta_2_prop)
+  colnames(est_eta_prop[,1:7]) <- names_shape
+  est_eta_prop$snr <- snr
+  rm(est_eta_1_prop)
+  rm(est_eta_2_prop)
+  
+  # apply inheritance procedure to get rejection rates:
+  # do one or three data.frames (one for each level)
+  # have the different hypotheses as rows and indicate by zero-one if the hypothesis is rejected
+  rej_ROI_KH <- rej_ROI_W <- data.frame(ROI= c(1:nROI),
+                                        matrix(0,ncol = B, nrow=nROI))
+  rej_cond_KH <-rej_cond_W <- data.frame(ROI= rep(c(1:nROI), each=2),
+                                         effect= rep(effect, nROI),
+                                         matrix(0, ncol=B, nrow=nROI*2))
+  rej_shape_KH <- rej_shape_W <- data.frame(ROI= rep(c(1:nROI), each=14),
+                                            effect= rep(rep(effect, each=7), nROI),
+                                            sp = rep(names_shape, nROI*2),
+                                            matrix(0, ncol=B, nrow=14*nROI))
   
   for(b in 1:B){
-    p_vals_full_KH <- c(dat_considered[[b]]$p_values_KH[1,], dat_considered[[b]]$p_values_KH[2,])
-    p_vals_full_Wald <- c(dat_considered[[b]]$p_values_Wald[1,], dat_considered[[b]]$p_values_Wald[2,])
-    
-    no_h0 <- length(p_vals_full_KH)
-    groups <- matrix(nrow=no_h0, ncol=2)
-    groups[,2] <- c(1:no_h0) #elementary hypotheses
-    groups[,1] <- c(rep(1, m), rep(2, m)) # conditions
-    
-    select_inference_KH <- get_TreeBH_updated(pvals = p_vals_full_KH, 
-                                                 groups= groups, 
-                                                 q= rep(0.05, 2), 
-                                                 test = c("simes", "arbitrary"), 
-                                                 procedure= c("BH", "BY")) 
-    select_inference_Wald <- get_TreeBH_updated(pvals = p_vals_full_Wald, 
-                                                   groups= groups, 
-                                                   q= rep(0.05, 2), 
-                                                   test = c("simes", "arbitrary"), 
-                                                   procedure= c("BH", "BY"))
-    # returns a matrix such as the group matrix which shows which hypotheses have been rejected
-    dat_rejected[b,-c(1:4)] <- select_inference_KH[1:m,2]
-    dat_rejected[B+b,-c(1:4)] <- select_inference_KH[(m+1):(2*m),2]
-    dat_rejected$test[c(b, B+b)] <- "KH"
-    dat_rejected[2*B+b, -c(1:4)] <- select_inference_Wald[1:m,2]
-    dat_rejected[3*B+b, -c(1:4)] <- select_inference_Wald[(m+1):(2*m),2]
-    dat_rejected$test[c(2*B+b, 3*B+b)] <- "Wald"
-  }
-  rejected_means <- data.frame(snr=rep(snr1,4),
-                               effect = rep(eff, each=2),
-                               test= rep(c("KH", "Wald"),2),
-                               PM_r = numeric(4),
-                               NA_r = numeric(4),
-                               TTP_r= numeric(4),
-                               TPN_r= numeric(4),
-                               FWHM_r= numeric(4),
-                               FWHN_r= numeric(4),
-                               AUC_r= numeric(4))
-  for(e in eff){
-    rejected_means[rejected_means$effect==e & rejected_means$test=="KH",-c(1:3)] <- colMeans(dat_rejected[dat_rejected$mean_effect==e & dat_rejected$snr==snr1 &dat_rejected$test=="KH",-c(1:4)])
-    rejected_means[rejected_means$effect==e & rejected_means$test=="Wald",-c(1:3)] <- colMeans(dat_rejected[dat_rejected$mean_effect==e &  dat_rejected$snr==snr1&dat_rejected$test=="Wald",-c(1:4)])
-    rejected_means[rejected_means$effect==e & rejected_means$test=="KH",-c(1:3)] <- colMeans(dat_rejected[dat_rejected$mean_effect==e & dat_rejected$snr==snr1 &dat_rejected$test=="KH",-c(1:4)])
-    rejected_means[rejected_means$effect==e & rejected_means$test=="Wald",-c(1:3)] <- colMeans(dat_rejected[dat_rejected$mean_effect==e &  dat_rejected$snr==snr1&dat_rejected$test=="Wald",-c(1:4)])
-  }
-  FDP_KH <- FDP_Wald <- numeric(1000)
-  if(0 %in% eff){
-    for(i in 1:B){
-      vec_rejections_KH <- c(as.numeric(dat_rejected[(dat_rejected$mean_effect==0&dat_rejected$test=="KH"&dat_rejected$iteration==i),-c(1:4)]),
-                          as.numeric(dat_rejected[(dat_rejected$mean_effect==0.5&dat_rejected$test=="KH"&dat_rejected$iteration==i),-c(1:4)]))
-      FDP_KH[i] <- fdp(vec_rejections_KH, id.true.null = c(1:7,10:13))
-      vec_rejections_W <- c(as.numeric(dat_rejected[(dat_rejected$mean_effect==0&dat_rejected$test=="Wald"&dat_rejected$iteration==i),-c(1:4)]),
-                             as.numeric(dat_rejected[(dat_rejected$mean_effect==0.5&dat_rejected$test=="Wald"&dat_rejected$iteration==i),-c(1:4)]))
-      FDP_Wald[i] <- fdp(vec_rejections_W, id.true.null = c(1:7,10:13))
+    # get the p-values for that, need to have the format:
+    # ROI_1_cond_1_PM, ROI_1_cond_1_NA,...,ROI_1_cond_2_PM,... ROI_5_cond_2_AUC
+    p_vals_KH <-p_vals_W <- numeric(0)
+    for(j in 1:nROI){
+      helper1 <- as.vector(t(sim_results[[b]]$proposed$p_values_KH[[j]]))
+      helper2 <- as.vector(t(sim_results[[b]]$proposed$p_values_Wald[[j]]))
+      p_vals_KH <- c(p_vals_KH, helper1)
+      p_vals_W <- c(p_vals_W, helper2)
     }
+    rejection_KH <- inheritance_selection(family_size=c(nROI,2,7), test=c("arbitrary"), alpha=alpha, p_vals_KH)$rejections
+    rejection_W <- inheritance_selection(family_size=c(nROI,2,7), test=c("arbitrary"), alpha=alpha, p_vals_W)$rejections
+    # this returns a list with rejections at each level of the hypothesis. Now safe it in the data.frames
+    rej_ROI_KH[rejection_KH[[1]],b+1] <- 1
+    rej_ROI_W[rejection_W[[1]],b+1] <- 1
+    
+    rej_cond_KH[rejection_KH[[2]], b+2] <- 1
+    rej_cond_W[rejection_W[[2]], b+2] <- 1
+    
+    rej_shape_KH[rejection_KH[[3]],b+3] <- 1
+    rej_shape_W[rejection_W[[3]],b+3] <- 1
+  }
+  ## report the empirical rejection rate, that is, the mean of the respective rows, without the first few rows:
+  av_rej_ROI <- data.frame(ROI=c(1:nROI),
+                           effect1= rep(effect[1], nROI),
+                           effect2= rep(effect[2], nROI),
+                           rej_rate_KH= rowMeans(rej_ROI_KH[,-1]),
+                           rej_rate_W= rowMeans(rej_ROI_W[,-1]))
+  av_rej_cond <- data.frame(ROI=rep(c(1:nROI),each=2),
+                            effect= rep(effect,nROI),
+                            rej_rate_KH= rowMeans(rej_cond_KH[,-c(1:2)]),
+                            rej_rate_W= rowMeans(rej_cond_W[,-c(1:2)]))
+  av_rej_shape <- data.frame(ROI= rep(c(1:nROI), each=14),
+                             effect= rep(rep(effect, each=7), nROI),
+                             sp = rep(names_shape, nROI*2),
+                             rej_rate_KH= rowMeans(rej_shape_KH[,-c(1:3)]),
+                             rej_rate_W= rowMeans(rej_shape_W[,-c(1:3)]))
+  
+  ## report the empirical FWER (so the (epmirical) probability of making at least one rejection)
+  # add to rejection dataframes a column indicating if null hypothesis is true or false
+  # do the same for the average rejection rate (since this coincides then to the FWER since all rejection rates are based on the same number of trials)
+  
+  rej_ROI_KH$H0 <- rej_ROI_W$H0 <- av_rej_ROI$H0 <- FALSE # since in our simulations, the ROI hypothesis is always true
+  
+  
+  if(!0%in%effect){
+    # if the effect size is not equal to zero, the condition hypotheses are false as well
+    rej_cond_KH$H0 <- rej_cond_W$H0 <- av_rej_cond$H0 <- FALSE 
+    
+    # if the effect size is not equal to zero, the PM, NA, AUC are false, all others are true
+    rej_shape_KH$H0 <- rej_shape_W$H0 <- av_rej_shape$H0 <-TRUE
+    rej_shape_KH$H0[rej_shape_KH$sp%in% c("PM", "NA", "AUC")] <-rej_shape_W$H0[rej_shape_W$sp%in% c("PM", "NA", "AUC")] <- av_rej_shape$H0[av_rej_shape$sp%in%c("PM", "NA", "AUC")] <-FALSE
+    
   }else{
-    for(i in 1:B){
-      vec_rejections_KH <- c(as.numeric(dat_rejected[(dat_rejected$mean_effect==eff[1]&dat_rejected$test=="KH"&dat_rejected$iteration==i),-c(1:4)]),
-                          as.numeric(dat_rejected[(dat_rejected$mean_effect==eff[2]&dat_rejected$test=="KH"&dat_rejected$iteration==i),-c(1:4)]))
-      FDP_KH[i]<- fdp(vec_rejections_KH, id.true.null = c(3:6,10:13))
-      vec_rejections_W <- c(as.numeric(dat_rejected[(dat_rejected$mean_effect==eff[1]&dat_rejected$test=="Wald"&dat_rejected$iteration==i),-c(1:4)]),
-                             as.numeric(dat_rejected[(dat_rejected$mean_effect==eff[2]&dat_rejected$test=="Wald"&dat_rejected$iteration==i),-c(1:4)]))
-      FDP_Wald[i]<- fdp(vec_rejections_W, id.true.null = c(3:6,10:13))
+    # when effect is zero, the null hypotheses are true for the respective condition
+    rej_cond_KH$H0[rej_cond_KH$effect==0] <- rej_cond_W$H0[rej_cond_W$effect==0] <-av_rej_cond$H0[av_rej_cond$effect==0]<- TRUE #if condition 1 has effect 0: the condition hypothesis is true
+    rej_cond_KH$H0[rej_cond_KH$effect!=0] <- rej_cond_W$H0[rej_cond_W$effect!=0] <-av_rej_cond$H0[av_rej_cond$effect!=0] <-FALSE
+    
+    # then, for the shape parameters, all hypotheses are true except for PM, NA, AUC of condition 2
+    rej_shape_KH$H0 <- rej_shape_W$H0 <- av_rej_shape$H0 <- TRUE
+    rej_shape_KH$H0[rej_shape_KH$sp%in% c("PM", "NA", "AUC") & rej_shape_KH$effect!=0] <-rej_shape_W$H0[rej_shape_W$sp%in% c("PM", "NA", "AUC")& rej_shape_W$effect!=0]<-av_rej_shape$H0[av_rej_shape$sp%in% c("PM", "NA", "AUC")& av_rej_shape$effect!=0] <- FALSE
+  }
+  rej_shape_KH$snr <- rej_shape_W$snr <- rej_cond_KH$snr <- rej_cond_W$snr <-rej_ROI_KH$snr <- rej_ROI_W$snr <-snr
+  av_rej_shape$snr <- av_rej_cond$snr <- av_rej_ROI$snr <- snr
+  
+  ## lastly: report also the test variance and its standard deviation (utilize the group level variance I believe...)
+  test_var_1_prop_KH <- test_var_1_prop_W <- test_var_2_prop_KH <- test_var_2_prop_W <- matrix(ncol=7, nrow=B*nROI)
+  #true_var_1_KH <- true_var_1_W <- true_var_2_KH <- true_var_2_W <- matrix(ncol=7, nrow=B*nROI)
+  for(b in 1:B){
+    for(j in 1:nROI){
+      for(s in 1:7){
+        test_var_1_prop_KH[((b-1)*nROI+j),s] <- group_sd_KH(sim_results[[b]]$proposed$variance_group_level[[j]][[s]][[1]], 
+                                                            betas_c= sim_results[[b]]$proposed$est_dif_shape_param[[j]][[s]][[1]], N) 
+        test_var_2_prop_KH[((b-1)*nROI+j),s] <- group_sd_KH(sim_results[[b]]$proposed$variance_group_level[[j]][[s]][[2]], 
+                                                            betas_c= sim_results[[b]]$proposed$est_dif_shape_param[[j]][[s]][[2]], N) 
+        
+        test_var_1_prop_W[((b-1)*nROI+j),s] <- group_sd_own(sim_results[[b]]$proposed$variance_group_level[[j]][[s]][[1]],N)
+        test_var_2_prop_W[((b-1)*nROI+j),s] <- group_sd_own(sim_results[[b]]$proposed$variance_group_level[[j]][[s]][[2]],N)
+      }
     }
   }
-  FDR <- c(mean(FDP_KH), mean(FDP_Wald))
-  names(FDR) <- c("FDR_KH", "FDR_Wald")
-  return(list(dat_rejected=dat_rejected,
-              rejected_means=rejected_means,
-              FDR=FDR))
+  
+  # Compute the average and empirical standard deviation:
+  av_test_sd <- data.frame(mean= c(colMeans(test_var_1_prop_KH, na.rm=T), 
+                                   colMeans(test_var_2_prop_KH, na.rm=T),
+                                   colMeans(test_var_1_prop_W, na.rm=T), 
+                                   colMeans(test_var_2_prop_W, na.rm=T)),
+                           sd= c(apply(test_var_1_prop_KH, 2, sd, na.rm=T), 
+                                 apply(test_var_2_prop_KH, 2, sd, na.rm=T),
+                                 apply(test_var_1_prop_W, 2, sd, na.rm=T), 
+                                 apply(test_var_2_prop_W, 2, sd, na.rm=T)),
+                           shape_para= rep(names_shape, 4),
+                           effect = rep(rep(effect, each=7),2),
+                           snr= rep(snr, 14*2),
+                           method= rep(c("KH", "Wald"), each=14))
+  test_var_1_prop_KH <- as.data.frame(test_var_1_prop_KH)
+  test_var_2_prop_KH <- as.data.frame(test_var_2_prop_KH)
+  test_var_1_prop_W <- as.data.frame(test_var_1_prop_W)
+  test_var_2_prop_W <- as.data.frame(test_var_2_prop_W)
+  
+  test_var_1_prop_KH$effect <-test_var_1_prop_W$effect <- effect[1]
+  test_var_2_prop_KH$effect <- test_var_2_prop_W$effect <-effect[2]
+  test_var_1_prop_KH$method <- test_var_2_prop_KH$method <- "KH"
+  test_var_1_prop_W$method <- test_var_2_prop_W$method <- "Wald"
+  
+  test_sd_prop <- rbind(test_var_1_prop_KH, test_var_2_prop_KH, test_var_1_prop_W, test_var_2_prop_W)
+  colnames(test_sd_prop[,1:7]) <- names_shape
+  test_sd_prop$snr <- snr
+  rm(test_var_1_prop_KH)
+  rm(test_var_2_prop_KH)
+  rm(test_var_1_prop_W)
+  rm(test_var_2_prop_W)
+  
+  out_proposed <- list(summary_eta= av_est_eta,
+                       summary_rej = list(ROI= av_rej_ROI,
+                                          condition= av_rej_cond,
+                                          shape= av_rej_shape),
+                       full_data = list(full_eta= est_eta_prop,
+                                        full_test_sd = test_sd_prop,
+                                        full_rejection_KH= list(ROI= rej_ROI_KH,
+                                                                condition= rej_cond_KH,
+                                                                shape= rej_shape_KH),
+                                        full_rejection_W=list(ROI= rej_ROI_W,
+                                                              condition= rej_cond_W,
+                                                              shape= rej_shape_W)))
+  return(out_proposed)
 }
+### Functions to compute the bias and MSE of the estimated differences at the group level:
+## Input:
+# basis_func: basis functions of the HRF model
+# basis_beta: basis beta used to simulate the BOLD signal
+# effect: mean change of the simulated BOLD signal
+## Output:
+# true difference in the considered shape parameters at the group level
+true_changes <- function(basis_func=hrf_basis_fun, basis_beta=c(3.2, -6.4, 3.2), effect){
+  hrf_bc <- basis_beta[1]*basis_func[,1]+basis_beta[2]*basis_func[,2]+basis_beta[3]*basis_func[,3]
+  m_ratio <- (basis_beta[1]+effect)/basis_beta[1]
+  hrf_ac <- hrf_bc*m_ratio
+  shape_bc <- shape_parameters2(hrf_bc, baseline=0, tres=0.1, max.ttp=12)[c(1,2,4:8)]
+  shape_ac <- shape_parameters2(hrf_ac, baseline=0, tres=0.1, max.ttp=12)[c(1,2,4:8)]
+  return(shape_ac-shape_bc)
+}
+## Input
+# summary_eta_prop: summary_eta; output of the analyze_known_cp
+# effect: considered effect size
+# mis: number indicating if the true change point location is misspecified
+analyze_eta <- function(summary_eta_prop, effect, mis){
+  summary_eta_prop$cp <- TRUE
+  true_effect <- c(true_changes(effect=effect[1]), true_changes(effect=effect[2]))
+  summary_eta_prop$bias <- summary_eta_prop$mean-true_effect
+  summary_eta_prop$mse <- (summary_eta_prop$bias)^2+summary_eta_prop$sd^2
+  summary_eta_prop$procedure <- "proposed"
+  return(rbind(summary_eta_prop))
+}
+
+### Compute the average rejection rates at the shape parameter level
+## Input
+# effect: considered effect size
+# snr: considered SNR
+# summary_rej: summary_rej from output of the analyze_known_cp
+# mis: number indicating if the true change point location is misspecified
+## Output
+# dataframe containing the average rejection rates per shape parameter, test statistic and effect size
+average_rej_prop <- function(effect, snr, summary_rej, mis=0){
+  rej_shape <- data.frame(test=rep(c("KH", "Wald"), each=7*2),
+                          effect= rep(rep(effect,each=7),2),
+                          shape= rep(c("PM", "NA","TTP", "TPN", "FWHM", "FWHN", "AUC"),4),
+                          rej_rate= c(mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="PM"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="NA"&summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="TTP"&summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="TPN"&summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="FWHM"&summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="FWHN"&summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="AUC"&summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="PM"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="NA"&summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="TTP"&summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="TPN"&summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="FWHM"&summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="FWHN"&summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_KH[summary_rej$shape$sp=="AUC"&summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="PM"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="NA"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="TTP"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="TPN"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="FWHM"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="FWHN"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="AUC"& summary_rej$shape$effect==effect[1]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="PM"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="NA"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="TTP"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="TPN"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="FWHM"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="FWHN"& summary_rej$shape$effect==effect[2]]),
+                                      mean(summary_rej$shape$rej_rate_W[summary_rej$shape$sp=="AUC"& summary_rej$shape$effect==effect[2]])),
+                          snr= rep(snr, 7*4))
+  rej_ROI$mis <- rej_cond$mis <- rej_shape$mis <- mis
+  rej_ROI$procedure <- rej_cond$procedure <- rej_shape$procedure <- "proposed"
+  return(rej_shpae)
+}
+
+### Compute the empricial FWER
+## Input
+# summary_rej: summary_rej from output of the analyze_known_cp
+# effect: considered effect size
+# snr: considered SNR
+# mis: number indicating if the true change point location is misspecified
+## Output
+# dataframe containing the empirical FWER per test statistic and considered effect sizes/ scenario
+empirical_FWER <- function(summary_rej, effect, snr,mis=0){
+  out <- data.frame(test= c("KH", "Wald"),
+                         effect1 = rep(effect[1],2),
+                         effect2= rep(effect[2],2),
+                         snr = rep(snr,2),
+                         level= rep("shape",2),
+                         FWER= round(c(mean(summary_rej_prop$shape$rej_rate_KH[summary_rej_prop$shape$H0]),
+                                 mean(summary_rej_prop$shape$rej_rate_W[summary_rej_prop$shape$H0])),4))
+  out$procedure <- "proposed"
+  out$mis <- mis
+  return(out)
+}
+
 
 ####
 # Unknown change point location
