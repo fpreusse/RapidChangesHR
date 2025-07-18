@@ -784,7 +784,7 @@ hrf_canonical <- function(t, a1=6, a2=12, b1=0.9, b2=0.9, d=0.35){
 # sigma2_w: Variance of the AR(1) process, corresponds to sigma^2_{epsilon_i}
 ## Remarks:
 # Note that the baseline of the BOLD signal per subjects corresponds to rnorm(N, 10, 1)
-sim_BOLD_canonical_one_condition <- function(mean_change=c(0.5),
+sim_BOLD_canonical_one_ROI <- function(mean_change=c(0.5),
                                              var_change=c(0.1),
                                              nscan=250, nstim=60,rho_noise,
                                              min_stat=10, snr, N){
@@ -869,7 +869,131 @@ sim_BOLD_canonical_one_condition <- function(mean_change=c(0.5),
                  sigma2_w = var_ar)
   return(output)
 }
+### Simulate BOLD signal based on canonical HRF; one change point; one condition, multiple ROI
+## Input:
+# mean_change: average change in the PM, corresponds to eta on group level
+# var_change: variance of the change, corresponds to between subject variance
+# nscan, nstim: number of scans and stimulus onsets, respectively
+# rho_noise: parameter of the AR(1) process
+# min_stat: minimum length of the stationary segment
+# snr: signal to noise ratio
+# N: number of subjects per group
+# nROI: number of considered ROI
+# rho_ROI: correlation  between the ROIs
+# start_number: necessary for output, used later to identify which ROI are dependent (i.e., belong to one subject)
+## Output:
+# BOLD: simulated BOLD signal for N subjects
+# true_cp_loc: true location of the change points per subject
+# true_changes: true effect sizes per subject
+# onsets: condition onset time series per subject
+# nscan, nstim: number of scans and stimulus onsets, respectively
+# SNR: Signal to noise ratio
+# rho_noise: parameter of the AR(1) process
+# rho_spatial: correlation coefficient between ROIs of one subject
+# sigma2_w: Variance of the AR(1) process, corresponds to sigma^2_{epsilon_i}
+# counter: counts the generated ROI, can be used to later identify which ROI belong to one subject.
+## Remarks:
+# Note that the baseline of the BOLD signal per subjects corresponds to rnorm(N, 10, 1)
+sim_BOLD_canonical_multiple_ROI <- function(mean_change=c(0.5),
+                                    var_change=c(0.1),
+                                    nscan=250, nstim=60,rho_noise,
+                                    min_stat=10, snr, N,
+                                    nROI, rho_ROI, start_number){
+  rho_ROI <- var_change*rho_ROI
+  ## Initialize Stimulus time series: 
+  ## this is the same for all participants
+  # Random interstimulus intervals with mean such that all stimuli fit in there
+  mean_itis <- floor(nscan/nstim)
+  # use while loop to ensure that max onset is not larger than nscan.
+  stim_done <- 0
+  while(stim_done ==0){
+    itis <- sample(c(mean_itis-1,mean_itis,mean_itis+1), size=nstim, replace=T) 
+    os <- numeric(nstim)
+    os[1] <- 1
+    for(k in 2:nstim){
+      os[k] <- os[k-1]+itis[k-1]
+    }
+    # check that max(os) is not larger than nscan
+    if(max(os)<=nscan){
+      stim_done <- 1
+    }
+  }
+  
+  stim_1 <-numeric(nscan)
+  stim_1[os] <- 1
+  
+  ## Initialize change points
+  # Choose randomly one change point excluding the very beginning and very end (defined by min_stat)
+  id_cp_1 <- sort(os) # time of stimulus presentation
+  id_cp_len_1 <- length(os)
+  
+  cp_loc <- sample(id_cp_1[(min_stat+1):(id_cp_len_1-min_stat)],N, replace=T)
+  stim_1_1 <- stim_1_2 <- matrix(0,ncol=nscan, nrow=N)
+  for(i in 1:N){
+    stim_1_1[i,1:(cp_loc[i]-1)] <- stim_1[1:(cp_loc[i]-1)]
+    stim_1_2[i,cp_loc[i]:nscan] <- stim_1[cp_loc[i]:nscan]
+  }
+  
+  true_cp <- rep(cp_loc, each=nROI) 
+  # true cp returns the first observation of a stationary block, should correspond to an onset.
 
+  ## Initialize the true shape of the two HRFs (now: four HRFs)
+  
+  # Intercept: not important for shape of HRF, assumed to not change. Add it anyways for estimation
+  beta_intercept <- rnorm(N*nROI, 10, 1) 
+  
+  # For changing HRF:
+  # use canonical HRF with changing effect size 
+  # Add here the correlation between the ROI, the correlation is assumed to be in the effect and not due to noise
+  sig_helper <- matrix(rho_ROI, ncol=nROI, nrow=nROI)
+  diag(sig_helper) <- var_change
+  
+  changes1 <- as.vector(t(mvrnorm(N, mu=rep(mean_change,nROI),Sigma=sig_helper)))
+  
+  ## These are vectors of length N*nROI with (Sub_1_ROI_1, Sub_1_ROI_2,...,Sub_N_ROI_nROI)
+  # If I wanted to have this in matrix form with ncol=nROI and nrow=N: matrix(changes, ncol=nROI, byrow=T)
+  
+  design_mat <- hrf_mat <- vector("list", N*nROI)
+ 
+  for(i in 1:N){
+    list_onsets <- list(first=which(stim_1_1[i,]!=0)*2,
+                        second= which(stim_1_2[i,] !=0)*2)
+    for(j in 1:nROI){
+      design_mat[[(i-1)*nROI+j]] <- simprepTemporal(onsets= list_onsets, duration=list(1,1), totaltime=nscan*2, TR=2, 
+                                         effectsize=list(1,(1+changes1[(i-1)*nROI+j])), hrf="double-gamma")
+    }
+  }
+  ## Define Y:
+  # add noise (temporal noise and white noise):
+  Y <- matrix(nrow=N*nROI, ncol=nscan)
+  var_ar <- numeric(N*nROI)
+  for(i in 1:(N*nROI)){
+    Signal <- simTSfmri(design= design_mat[[i]],
+                       base= beta_intercept[i],
+                       noise="none") 
+    var_epsilon <- (mean(Signal)/snr)^2
+    sd_ar <- var_ar[i] <- sqrt(var_epsilon*(1-rho_noise^2))
+    Y[i,] <- Signal+arima.sim(model=list(ar=rho_noise),n=nscan, sd=sd_ar)
+  }
+ var_ar <- var_ar^2
+ # BOLD signal is now a matrix with nrow with Sub_1_ROI_1, Sub_1_ROI_2,..., Sub_N_ROI_nROI
+ # To ensure that at the end we can put the results in an order and remember which ROIs belong together:
+ # we number the observed BOLD signal from start_number to start_number+(N*nROI-1)
+ # counter <- c(start_number:(start_number+N*nROI)) (added to output)
+ # the ROIs in a block of three belong together, I can always start with absurd large number if I want to make it easier.
+  output <- list(BOLD=Y,
+                 true_cp_loc = true_cp,
+                 true_changes= changes1,
+                 onsets = stim_1,
+                 nscan=nscan,
+                 nstim= nstim, 
+                 SNR=snr,
+                 rho_noise=rho_noise,
+                 rho_spatial=rho_ROI,
+                 sigma2_w = var_ar,
+                 counter= c(start_number:(start_number+(N*nROI)-1)))
+  return(output)
+}
 
 ### Analysis on group level:
 ## Input:
@@ -1226,8 +1350,10 @@ est_var_sp_subject <- function(betas, covar_betas,nHR=NULL, hrf=hrf_basis_fun, m
 #                     Besides around true change point location, the difference between the considered change points is a Vielfaches of min_dif_between_cp
 #                     Can be set to one if I want random change point locations
 #                     Only needed when true change point location is known, otherwise we use equi-distance between all possible change point locations.
-# break_while: maximal number of iterations in while loop to compute the posi confidence distribution. Breaks loop even if not N_iter_CD observations have been reached
+# miss_spec: by how much is true change point misspecified. If true change point location is considered: set to zero.
+# number: needed if several ROI are used to be able to identify ROIs belonging to one subject.
 ## Output:
+# number: id for the considered ROI
 # hat_dif: estimated beta coefficient [OLS] corresponding to the estimated change in the peak magnitude
 # hat_var_beta: estimated variance of hat_dif; WITHOUT accounting for model selection 
 # hat_var_cd: post-selection variance of beta
@@ -1236,7 +1362,7 @@ est_var_sp_subject <- function(betas, covar_betas,nHR=NULL, hrf=hrf_basis_fun, m
 # Conf_dist: approximation of the confidence distribution
 # est_cp: estimated change point location
 ## Remarks:
-# # This function is for one condition only with one change point.
+# This function is for one condition with one change point and multiple ROIs
 est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
                          min_seg,
                          Var_known=NULL,
@@ -1244,8 +1370,7 @@ est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
                          fixed.seed=NULL,
                          N_iter_CD=500,N_iter_int=250,
                          full_X=F, true_cp=NULL, n_cons_cp=4,
-                         min_dif_between_cp=5,
-                         break_while=50000){
+                         min_dif_between_cp=5, miss_spec=0, number){
   id_cp <- which(onsets==1)
   id_all_pos_cp <- id_cp[(min_seg+1):(nstim-min_seg+1)]
   length_all_pos_cp <- length(id_all_pos_cp)
@@ -1254,29 +1379,59 @@ est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
       true_cp_1 <- true_cp}else{
         true_cp_1 <- id_all_pos_cp[min(which(id_all_pos_cp>true_cp))]
       }
-    if(min_dif_between_cp==1){
-      id_all_pos_cp <- id_all_pos_cp[-which(id_all_pos_cp==true_cp_1)]
-      considered_cp <- sort(c(true_cp_1, id_all_pos_cp[sample(c(1:(length_all_pos_cp-1)), size=n_cons_cp-1)]))
-    }else{
-      id.true.cp <- which(id_all_pos_cp==true_cp_1)
-      seq_cons <- seq(from=1, to=length_all_pos_cp, by=min_dif_between_cp) #sequence of considered cp with a minimum of 5 between them; crude approximation
-      if(id.true.cp%in%seq_cons){
-        considered_cp <- sort(c(true_cp_1, id_all_pos_cp[sample(seq_cons[-which(seq_cons==id.true.cp)], size=n_cons_cp-1)]))
+    if(miss_spec!=0){
+      id_true <- which(id_all_pos_cp==true_cp_1)
+      id_mis <- id_true+sample(seq(-miss_spec,miss_spec,1),1)
+      cp_mis <- id_all_pos_cp[id_mis]
+      if(min_dif_between_cp==1){
+        id_all_pos_cp <- id_all_pos_cp[-c(id_true, id_mis)]
+        considered_cp <- sort(c(cp_mis, id_all_pos_cp[sample(c(1:(length_all_pos_cp-2)), size=n_cons_cp-1)]))
       }else{
-        seq_helper <- c(-5, seq_cons, max(seq_cons)+10)
-        # using the seq_helper ensures that at least one value is larger/ smaller than the id.true.cp, even if it is at an extreme position.
-        id_remove <- c(max(which(seq_helper<id.true.cp)), min(which(seq_helper>id.true.cp)))
-        # if id_remove contains the first or last entry in seq_helper: remove it
-        # note: both cannot happen at the same time!
-        if(1%in%id_remove){
-          id_remove <- id_remove[2]
+        seq_cons <- seq(from=1, to=length_all_pos_cp, by=min_dif_between_cp) #sequence of considered cp with a minimum of 5 between them; crude approximation
+        if(id_true%in%seq_cons| cp_mis%in%seq_cons){
+          # remove the true_cp and/or cp_mis from the other considered change point locations
+          considered_cp <- sort(c(cp_mis, id_all_pos_cp[sample(seq_cons[-which(seq_cons%in%c(id_true, id_mis))], size=n_cons_cp-1)]))
+        }else{
+          seq_helper <- c(-5, seq_cons, max(seq_cons)+10)
+          # using the seq_helper ensures that at least one value is larger/ smaller than cp_mis, even if cp_mis is at an extreme position.
+          id_remove <- c(max(which(seq_helper<cp_mis)), min(which(seq_helper>cp_mis)))
+          # if id_remove contains the first or last entry in seq_helper: remove it
+          # note: both cannot happen at the same time!
+          if(1%in%id_remove){
+            id_remove <- id_remove[2]
+          }
+          if(length(seq_helper)%in% id_remove){
+            id_remove <- id_remove[1]
+          }
+          considered_cp <- sort(c(cp_mis, id_all_pos_cp[sample(seq_cons[-(id_remove-1)], size=n_cons_cp-1)]))
         }
-        if(length(seq_helper)%in% id_remove){
-          id_remove <- id_remove[1]
+      }
+    }else{
+      if(min_dif_between_cp==1){
+        id_all_pos_cp <- id_all_pos_cp[-which(id_all_pos_cp==true_cp_1)]
+        considered_cp <- sort(c(true_cp_1, id_all_pos_cp[sample(c(1:(length_all_pos_cp-1)), size=n_cons_cp-1)]))
+      }else{
+        id.true.cp <- which(id_all_pos_cp==true_cp_1)
+        seq_cons <- seq(from=1, to=length_all_pos_cp, by=min_dif_between_cp) #sequence of considered cp with a minimum of 5 between them; crude approximation
+        if(id.true.cp%in%seq_cons){
+          considered_cp <- sort(c(true_cp_1, id_all_pos_cp[sample(seq_cons[-which(seq_cons==id.true.cp)], size=n_cons_cp-1)]))
+        }else{
+          seq_helper <- c(-5, seq_cons, max(seq_cons)+10)
+          # using the seq_helper ensures that at least one value is larger/ smaller than the id.true.cp, even if it is at an extreme position.
+          id_remove <- c(max(which(seq_helper<id.true.cp)), min(which(seq_helper>id.true.cp)))
+          # if id_remove contains the first or last entry in seq_helper: remove it
+          # note: both cannot happen at the same time!
+          if(1%in%id_remove){
+            id_remove <- id_remove[2]
+          }
+          if(length(seq_helper)%in% id_remove){
+            id_remove <- id_remove[1]
+          }
+          considered_cp <- sort(c(true_cp_1, id_all_pos_cp[sample(seq_cons[-(id_remove-1)], size=n_cons_cp-1)]))
         }
-        considered_cp <- sort(c(true_cp_1, id_all_pos_cp[sample(seq_cons[-(id_remove-1)], size=n_cons_cp-1)]))
       }
     }
+    
   }else{
     considered_cp <- id_all_pos_cp[round(seq(from=1, to=length_all_pos_cp, length.out=n_cons_cp),0)]
   }
@@ -1384,13 +1539,13 @@ est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
                                last_length_theta_star=last.length.theta.star,
                                X_f = full_X,adapt_start=F,
                                N_iter_int=N_iter_int, N_iter_CD=N_iter_CD,
-                               break_while=break_while)
+                               break_while=20000)
   ###
   ## Compute the variance based on P_star
   ###
   ## Compute the confidence density
   # first: remove any values that have less than 100 iterations (we cannot trust them...)
-  id_remove <- which(P_star$iterations< 500)
+  id_remove <- which(P_star$iterations< 100)
   if(length(id_remove)!=0){
     F_cd <- 1-round(P_star$mean_theta_star_leq_theta[-id_remove],4)
     last.length.theta.star <- length(F_cd)
@@ -1398,7 +1553,7 @@ est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
     F_cd <- 1-round(P_star$mean_theta_star_leq_theta,4)
   }
   ## Check for unreasonable values; these can happen due to using Monte Carlo methods to compute the confidence distribution
-  # Currently, we simplify by substituting the unreasonable value with the mean of the values before and after
+  # Currently, we simplify life by substituting the unreasonable value with the mean of the values before and after
   # Repeat until there are no unreasonable values left (check after each update)
   id_larger <- which(F_cd[-1]< F_cd[-last.length.theta.star])
   while(length(id_larger)!=0){
@@ -1407,25 +1562,33 @@ est_betas_cd <- function(BOLD_signal, onsets, nscan, nstim,
     }
     id_larger <- which(F_cd[-1]< F_cd[-last.length.theta.star])
   }
+  # what if the extreme values do not fit?
+  
   ## Compute the confidence density; use 1-CD
+  
   f_cd <- c(F_cd[1], F_cd[-1]-F_cd[-last.length.theta.star])
   
-  ## Compute expected value and variance of the confidence distribution
+  ## Compute the expected value, as well as the expected value of theta^2
   if(length(id_remove)!=0){
     P_star_theta <- P_star$theta_star[-id_remove]
   }else{
     P_star_theta <- P_star$theta_star
   }
-  E_cd <- sum(P_star_theta*f_cd)
-  Var_cd <- sum(P_star_theta^2*f_cd)-E_cd^2
   
-  ## Find the value for which F_cd approx 0.5
+  E_cd <- sum(P_star_theta*f_cd, na.rm=T)
+  Var_cd <- sum(P_star_theta^2*f_cd, na.rm=T)-E_cd^2
+  
+  ## Find the value for which F_cd=0.5
   # use weighted mean of values larger than 0.5 and lower than 0.5:
   F_05 <- F_cd-0.5
   id.05 <- c(min(which(F_05>0)), max(which(F_05<0)))
   dif_cd <- (1-abs(F_05[id.05[1]])/sum(abs(F_05[id.05])))*P_star_theta[id.05[1]]+(1-abs(F_05[id.05[2]])/sum(abs(F_05[id.05])))*P_star_theta[id.05[2]]
-
-  return(list(hat_dif = mod_select$hat_beta[2],
+  
+  ## Find the value at which confidence distribution has probability of 0.5 (roughly)
+  # Since there will probably not be a single value, use the weighted mean?
+  # or use the expected value? In many cases, the ex
+  return(list(number=number,
+              hat_dif = mod_select$hat_beta[2],
               hat_var_beta= var_betas[2,2],
               hat_var_cd = Var_cd,
               hat_dif_cd= dif_cd,
